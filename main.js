@@ -78,6 +78,9 @@ function crearVentanaPrincipal(display) {
       contextIsolation: true,
       nodeIntegration:  false,
       preload:          PRELOAD,
+      // El panel (validación de ingreso) y el motor ZeusX corren en esta
+      // ventana: tienen que responder a tiempo aunque no esté a la vista.
+      backgroundThrottling: false,
     },
   });
 
@@ -107,6 +110,7 @@ function crearVentanaKiosk(display) {
       contextIsolation: true,
       nodeIntegration:  false,
       preload:          PRELOAD,
+      backgroundThrottling: false,
     },
   });
 
@@ -115,6 +119,7 @@ function crearVentanaKiosk(display) {
   // mostrar un botón de volver que en el monitor 2 real no debe aparecer.
   const url = APP_URL + "/admin?kiosk=1";
   attachOfflineFallback(win, url);
+  win.webContents.on("did-finish-load", () => enfocarKiosk());
   win.loadURL(url);
   return win;
 }
@@ -138,7 +143,6 @@ function activarKiosk() {
 
   if (!kioskWin || kioskWin.isDestroyed()) {
     kioskWin = crearVentanaKiosk(secondary);
-    if (mainWindowRef) reenviarNumpadAlKiosk(mainWindowRef, kioskWin);
   } else {
     if (kioskWin.isMinimized()) kioskWin.restore();
     kioskWin.setBounds(secondary.bounds);
@@ -312,12 +316,110 @@ ipcMain.handle("kiosk-toggle", () => {
   return activa ? desactivarKiosk() : activarKiosk();
 });
 
-// ── Teclas del numpad que se reenvían al kiosk ────────────────────────────────
+// ── Foco: el kiosk es el dueño del teclado ──────────────────────────────────
+// En la sala hay un teclado numérico para que los repartidores se anoten; en
+// esta PC solo corre Zeus. Windows le manda TODAS las teclas a la ventana con
+// foco y no distingue teclados, así que:
+//   - Al arrancar, el foco va al kiosk.
+//   - Si el operador usa la principal (mouse sobre ella o teclado), la usa
+//     normal, con el teclado completo (numpad incluido).
+//   - Sin actividad del operador por FOCO_INACTIVIDAD_MS, el foco vuelve al
+//     kiosk (FOCO_FORMULARIO_MS si está escribiendo en un formulario).
+//   - Si llega una tecla del numpad a la principal y nadie la está usando,
+//     es un repartidor: la tecla va al kiosk y el foco pasa ahí al instante.
+
+const FOCO_INACTIVIDAD_MS = 3000;
+const FOCO_FORMULARIO_MS  = 15000;
+const FOCO_CHEQUEO_MS     = 500;
+
 const NUMPAD_DIGITS = new Set([
   "Numpad0","Numpad1","Numpad2","Numpad3","Numpad4",
   "Numpad5","Numpad6","Numpad7","Numpad8","Numpad9",
 ]);
 
+// ¿Hay un campo de formulario activo en la principal? (el input de ID del
+// panel, #cadete-id, no cuenta: siempre tiene el foco dentro de la página)
+const SCRIPT_EN_FORMULARIO = `(() => {
+  const a = document.activeElement;
+  if (!a || a.id === "cadete-id") return false;
+  if (a.isContentEditable) return true;
+  return /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !a.readOnly && !a.disabled;
+})()`;
+
+function kioskDisponible() {
+  return Boolean(kioskWin && !kioskWin.isDestroyed() && kioskWin.isVisible());
+}
+
+function enfocarKiosk() {
+  if (!kioskDisponible()) return;
+  kioskWin.focus();
+  kioskWin.webContents.focus();
+}
+
+function teclaNumpadParaKiosk(input) {
+  if (NUMPAD_DIGITS.has(input.code))   return input.key;    // "0"–"9"
+  if (input.code === "NumpadEnter")    return "Return";
+  if (input.code === "NumpadDecimal")  return "Backspace";  // punto del numpad = borrar
+  return null;
+}
+
+function instalarGestorFoco(mainWin) {
+  let ultimaActividad = Date.now();
+  let ultimoCursor    = null;
+
+  mainWin.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+
+    const keyCode = teclaNumpadParaKiosk(input);
+    const operadorInactivo = Date.now() - ultimaActividad >= FOCO_INACTIVIDAD_MS;
+
+    if (keyCode && operadorInactivo && kioskDisponible()) {
+      // Nadie usa la principal → es un repartidor en el numpad de la sala
+      event.preventDefault();
+      kioskWin.webContents.sendInputEvent({ type: "keyDown", keyCode });
+      kioskWin.webContents.sendInputEvent({ type: "keyUp",   keyCode });
+      enfocarKiosk();
+      return;
+    }
+
+    ultimaActividad = Date.now();
+  });
+
+  // Clic / Alt+Tab hacia la principal = el operador la quiere usar
+  mainWin.on("focus", () => { ultimaActividad = Date.now(); });
+
+  const timer = setInterval(async () => {
+    if (mainWin.isDestroyed()) { clearInterval(timer); return; }
+    if (!kioskDisponible()) return;
+
+    // Mouse moviéndose sobre la principal = actividad del operador
+    const cursor = screen.getCursorScreenPoint();
+    const b      = mainWin.getBounds();
+    const movio  = ultimoCursor && (cursor.x !== ultimoCursor.x || cursor.y !== ultimoCursor.y);
+    ultimoCursor = cursor;
+    if (movio && cursor.x >= b.x && cursor.x < b.x + b.width && cursor.y >= b.y && cursor.y < b.y + b.height) {
+      ultimaActividad = Date.now();
+    }
+
+    const enfocada = BrowserWindow.getFocusedWindow();
+    if (enfocada === kioskWin) return;
+
+    let limite = FOCO_INACTIVIDAD_MS;
+    if (enfocada === mainWin) {
+      const enFormulario = await mainWin.webContents
+        .executeJavaScript(SCRIPT_EN_FORMULARIO, true)
+        .catch(() => false);
+      if (enFormulario) limite = FOCO_FORMULARIO_MS;
+    }
+
+    if (Date.now() - ultimaActividad >= limite) enfocarKiosk();
+  }, FOCO_CHEQUEO_MS);
+}
+
+// RESERVA: reenvío viejo — copiaba el numpad de la principal al kiosk sin
+// sacárselo a la principal (el ID se procesaba dos veces). Reemplazado por
+// instalarGestorFoco. Se conserva para análisis/rollback.
+// eslint-disable-next-line no-unused-vars
 function reenviarNumpadAlKiosk(mainWin, kioskWin) {
   mainWin.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown")              return;
@@ -364,8 +466,11 @@ app.whenReady().then(() => {
   if (displays.length >= 2) {
     const secondary = displays.find(d => d.id !== primary.id);
     kioskWin        = crearVentanaKiosk(secondary);
-    reenviarNumpadAlKiosk(mainWin, kioskWin);
   }
+
+  // Se instala siempre: si el kiosk se activa después ("Pantalla 2"),
+  // el gestor lo toma de la variable global kioskWin.
+  instalarGestorFoco(mainWin);
 
   // Cerrar la ventana principal (Alt+F4, único modo de cierre disponible en
   // fullscreen sin barra de título) es la señal real de "quiero cerrar la
