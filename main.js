@@ -1,5 +1,6 @@
 const path                                             = require("path");
 const { app, BrowserWindow, ipcMain, screen, session } = require("electron");
+const { autoUpdater } = require("electron-updater");
 
 const APP_URL    = "https://pwa-panel-local.netlify.app";
 const PRELOAD    = path.join(__dirname, "preload.js");
@@ -437,6 +438,28 @@ function reenviarNumpadAlKiosk(mainWin, kioskWin) {
   });
 }
 
+// ── Actualizaciones automáticas de la cáscara ────────────────────────────────
+// La APP (Cadev2) se actualiza sola desde Netlify en cada arranque. Esto
+// actualiza la CÁSCARA (este main.js, preload, etc.) desde GitHub Releases
+// (repo nicolasrigourd/zeusengine): busca al arrancar y cada 6 h, descarga en
+// segundo plano y se instala al cerrar Zeus (o al próximo reinicio de la PC).
+const UPDATE_CHECK_MS = 6 * 60 * 60 * 1000;
+
+function iniciarActualizaciones() {
+  if (!app.isPackaged) return; // en desarrollo (npm start) no hay nada que actualizar
+
+  autoUpdater.autoDownload         = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on("update-available",  (info) => console.log("[UPDATER] versión nueva disponible:", info?.version));
+  autoUpdater.on("update-downloaded", (info) => console.log("[UPDATER] descargada, se instala al cerrar:", info?.version));
+  autoUpdater.on("error",             (err)  => console.warn("[UPDATER] error:", err?.message));
+
+  const buscar = () => autoUpdater.checkForUpdates().catch((err) => console.warn("[UPDATER] no se pudo buscar:", err?.message));
+  buscar();
+  setInterval(buscar, UPDATE_CHECK_MS);
+}
+
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 
 let mainWindowRef = null;
@@ -471,6 +494,8 @@ app.whenReady().then(() => {
   // Se instala siempre: si el kiosk se activa después ("Pantalla 2"),
   // el gestor lo toma de la variable global kioskWin.
   instalarGestorFoco(mainWin);
+
+  iniciarActualizaciones();
 
   // Cerrar la ventana principal (Alt+F4, único modo de cierre disponible en
   // fullscreen sin barra de título) es la señal real de "quiero cerrar la
