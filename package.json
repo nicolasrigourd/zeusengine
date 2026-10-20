@@ -1,0 +1,29 @@
+{
+  "name": "cadev2-local",
+  "version": "1.0.0",
+  "description": "App local Zeus Engine — El Cadete Express",
+  "author": "El Cadete Express",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.elcadeteexpress.cadev2",
+    "productName": "Zeus Engine",
+    "win": {
+      "target": "nsis",
+      "icon": "icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^26.0.0"
+  }
+}
